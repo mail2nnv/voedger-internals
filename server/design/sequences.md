@@ -148,7 +148,6 @@ To access sequences `ISequencer` interface is used.
     - Read 
     - Set status `Ready`
 
-
 ### Sequencer.flush()
 
 
