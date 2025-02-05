@@ -97,22 +97,31 @@ subgraph IAppPartitions
   DeployApp@{ shape: fr-rect, label: "Deploy" }
 end
 
+subgraph ISequenceFactory
+  New@{ shape: fr-rect, label: "New() ISequencer" }
+end
+
+IAppPartitions -..->|creates|ISequenceFactory
+
 DeployApp --> IAppPartition
 
 subgraph IAppPartition
   DeployPartition@{ shape: fr-rect, label: "Deploy" }
 end
 
-DeployPartition ---> recovery
+DeployPartition -..->|calls| New
 
 subgraph Cassandra [Cassandra DB]
   PLog@{ shape: cyl, label: "PLog" }
   SeqView@{ shape: cyl, label: "Sequence view" }
 end
 
+New -..->|creates| ISequencer
+New -..->|calls| recovery
+
 subgraph ISequencer
 
-  subgraph API
+  subgraph API[Interface]
     StartEvent@{ shape: fr-rect, label: "StartEvent(wait, ws) (plogOffset, wlogOffset)" }
     NextRecID@{ shape: fr-rect, label: "NextRecID() RecordID" }
     NextCRecID@{ shape: fr-rect, label: "NextCRecID() RecordID" }
@@ -121,12 +130,12 @@ subgraph ISequencer
     StartEvent~~~NextRecID~~~NextCRecID~~~FinishEvent~~~CancelEvent
   end
 
-  subgraph Sequencer["Sequencer implementation"]
-    recovery@{ shape: doc, label: "recovery()" }
+  subgraph Sequencer["Implementation"]
+    recovery@{ shape: odd, label: "⚡ recovery()" }
 
     subgraph flusher
-        collect@{ shape: doc, label: "collect()" }
-        flush@{ shape: doc, label: "flush()" }
+        collect@{ shape: fr-rect, label: "collect()" }
+        flush@{ shape: odd, label: "⚡ flush()" }
         collect -..->|"calls if changes >= 100"| flush
     end
   end
@@ -144,7 +153,7 @@ recovery <-..->|reads| PLog
 subgraph processor [CP event loop]
     GetRawEvent@{ shape: lean-r, label: "Get raw event" }
     GetRawEvent --> BuildPLogEvent
-    subgraph BuildPLogEvent
+    subgraph BuildPLogEvent["PLog event building"]
       Offsets@{ shape: fr-rect, label: "Calc offsets" }
       Offsets <-..->|calls| StartEvent
       Offsets -->|Success StartEvent| CUDs
