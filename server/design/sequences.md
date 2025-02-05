@@ -19,7 +19,7 @@ QNames for sequences are defined in `appdef/sys`:
 - `sys.appdef.RecIDSeq`
 - `sys.appdef.CRecIDSeq`
 
-Field names for sequences are defined in `appdef/sys`:
+Field names for sequences view are defined in `appdef/sys`:
 
 - `SequencesView_PID`
 - `SequencesView_WSID`
@@ -36,23 +36,23 @@ To access sequences `ISequencer` interface is used.
   - `ISequenceFactory`
   - `ISequencer`
   - `NewFactory(istructs.IAppStructs) ISequenceFactory`
-- `pkg/sequence/sequencer`
-  - `Sequencer` supports `sequence.ISequencer`
-- `appparts.AppPartitions`
+- `pkg/sequences/sequencer`
+  - `Sequencer` supports `sequences.ISequencer`
+- `pkg/appparts`
   - `IAppPartition.Sequencer() ISequencer`
 
 ## Interface `ISequenceFactory`
 
 ### `sequence.NewFactory(str istructs.IAppStructs) ISequenceFactory`
 
-- Actor: `IAppPartitions`
+- Actor: `appparts.IAppPartitions`
 - When: application is deployed
 - Flow:
   - Create a new `sequenceFactory` instance with `newSequenceFactory(str)`
 
 ### `ISequenceFactory.New(pid istructs.PartitionID) (ISequencer, cleanup func())`
 
-- Actor: `IAppPartition`
+- Actor: `appparts.IAppPartition`
 - When: app partition is deployed
 - Flow:
   - Create new cancelable context `ctx` with `context.Background()`
@@ -88,6 +88,87 @@ To access sequences `ISequencer` interface is used.
 - `Eventing`
 - `Finished`
 
+## Flow control schema
+
+```mermaid
+flowchart
+
+subgraph IAppPartitions
+  DeployApp@{ shape: fr-rect, label: "Deploy" }
+end
+
+DeployApp --> IAppPartition
+
+subgraph IAppPartition
+  DeployPartition@{ shape: fr-rect, label: "Deploy" }
+end
+
+DeployPartition ---> recovery
+
+subgraph Cassandra [Cassandra DB]
+  PLog@{ shape: cyl, label: "PLog" }
+  SeqView@{ shape: cyl, label: "Sequence view" }
+end
+
+subgraph ISequencer
+
+  subgraph API
+    StartEvent@{ shape: fr-rect, label: "StartEvent(wait, ws) (plogOffset, wlogOffset)" }
+    NextRecID@{ shape: fr-rect, label: "NextRecID() RecordID" }
+    NextCRecID@{ shape: fr-rect, label: "NextCRecID() RecordID" }
+    FinishEvent@{ shape: fr-rect, label: "FinishEvent()" }
+    CancelEvent@{ shape: fr-rect, label: "CancelEvent()" }
+    StartEvent~~~NextRecID~~~NextCRecID~~~FinishEvent~~~CancelEvent
+  end
+
+  subgraph Sequencer["Sequencer implementation"]
+    recovery@{ shape: doc, label: "recovery()" }
+
+    subgraph flusher
+        collect@{ shape: doc, label: "collect()" }
+        flush@{ shape: doc, label: "flush()" }
+        collect -..->|"calls if changes >= 100"| flush
+    end
+  end
+
+  StartEvent  <-..->|waits for| recovery
+  FinishEvent -..->|calls| collect
+  CancelEvent -..->|calls| recovery
+end
+
+flush -..->|updates| SeqView
+
+recovery <-..->|reads| SeqView
+recovery <-..->|reads| PLog
+
+subgraph processor [CP event loop]
+    GetRawEvent@{ shape: lean-r, label: "Get raw event" }
+    GetRawEvent --> BuildPLogEvent
+    subgraph BuildPLogEvent
+      Offsets@{ shape: fr-rect, label: "Calc offsets" }
+      Offsets <-..->|calls| StartEvent
+      Offsets -->|Success StartEvent| CUDs
+      CUDs@{ shape: fr-rect, label: "Build CUDs" }
+      CUDs <-..->|ORec,WRec| NextRecID
+      CUDs <-..->|CRec| NextCRecID
+      CUDs --> Args
+      Args@{ shape: fr-rect, label: "Build Args" }
+      Args <-..->|Object| NextRecID
+    end
+    BuildPLogEvent --> SavePLogEvent
+    SavePLogEvent@{ shape: hex, label: "Save PLog event" }
+    SavePLogEvent -..->|saves| PLog
+    SavePLogEvent -..->|calls if Success| FinishEvent
+    SavePLogEvent -..->|calls if Failed| CancelEvent
+    SavePLogEvent -->|Success| ApplyCUDs
+    ApplyCUDs@{ shape: fr-rect, label: "Apply event records" }
+    ApplyCUDs --> SyncProj
+    SyncProj@{ shape: fr-rect, label: "Sync projectors" }
+    SyncProj --> SaveWLog
+    SaveWLog@{ shape: fr-rect, label: "Save WLog event" }
+end
+```
+
 ## Implementation `Sequencer`
 
 ### `Sequencer`
@@ -118,8 +199,8 @@ To access sequences `ISequencer` interface is used.
 
 - Switch on `Sequencer.Status()`:
   - case `Recover`:
-    - Wait for `Sequencer.Status()` is `Ready` during duration or context is done
-      - If `Sequencer.Status()` is `Ready`, then fall through to `Ready`
+    - Wait for `Sequencer.Status()` is `Ready` during `wait` duration expired or `Sequencer.ctx` is done
+      - If ok (`Sequencer.Status()` is `Ready`), then fall through to `Ready`
       - else return (`istructs.NullOffset`, `istructs.NullOffset`)
   - case `Ready`:
     - Set `Sequencer.status` to `Eventing`
